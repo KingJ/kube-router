@@ -286,9 +286,9 @@ func (nrc *NetworkRoutingController) Run(healthChan chan<- *healthcheck.Controll
 			glog.Errorf("Error advertising route: %s", err.Error())
 		}
 
-		err = nrc.addExportPolicies()
+		err = nrc.AddPolicies()
 		if err != nil {
-			glog.Errorf("Error adding BGP export policies: %s", err.Error())
+			glog.Errorf("Error adding BGP policies: %s", err.Error())
 		}
 
 		if nrc.bgpEnableInternal {
@@ -440,7 +440,8 @@ func (nrc *NetworkRoutingController) injectRoute(path *table.Path) error {
 
 	// create IPIP tunnels only when node is not in same subnet or overlay-type is set to 'full'
 	// prevent creation when --override-nexthop=true as well
-	if (!sameSubnet || nrc.overlayType == "full") && !nrc.overrideNextHop {
+	// if the user has disabled overlays, don't create tunnels
+	if (!sameSubnet || nrc.overlayType == "full") && !nrc.overrideNextHop && nrc.enableOverlays {
 		// create ip-in-ip tunnel and inject route as overlay is enabled
 		var link netlink.Link
 		var err error
@@ -488,12 +489,14 @@ func (nrc *NetworkRoutingController) injectRoute(path *table.Path) error {
 			Dst:       dst,
 			Protocol:  0x11,
 		}
-	} else {
+	} else if sameSubnet {
 		route = &netlink.Route{
 			Dst:      dst,
 			Gw:       nexthop,
 			Protocol: 0x11,
 		}
+	} else {
+		return nil
 	}
 
 	if path.IsWithdraw {
@@ -549,7 +552,15 @@ func (nrc *NetworkRoutingController) syncNodeIPSets() error {
 	currentPodCidrs := make([]string, 0)
 	currentNodeIPs := make([]string, 0)
 	for _, node := range nodes.Items {
-		currentPodCidrs = append(currentPodCidrs, node.Spec.PodCIDR)
+		podCIDR := node.GetAnnotations()["kube-router.io/pod-cidr"]
+		if podCIDR == "" {
+			podCIDR = node.Spec.PodCIDR
+		}
+		if podCIDR == "" {
+			glog.Warningf("Couldn't determine PodCIDR of the %v node", node.Name)
+			continue
+		}
+		currentPodCidrs = append(currentPodCidrs, podCIDR)
 		nodeIP, err := utils.GetNodeIP(&node)
 		if err != nil {
 			return fmt.Errorf("Failed to find a node IP: %s", err)
